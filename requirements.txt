@@ -1,0 +1,8 @@
+streamlit
+pandas
+ifcopenshell
+openai
+python-dotenv
+matplotlib
+openpyxl
+dotenv
