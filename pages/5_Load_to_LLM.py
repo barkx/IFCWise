@@ -1,4 +1,3 @@
-
 import streamlit as st
 import os
 import pandas as pd
@@ -13,14 +12,18 @@ st.set_page_config(page_title="I/F/C/Wise – Upload to Assistant", page_icon="i
 sidebar.sidebar_navigation()
 
 st.title("Upload Full IFC Model to Assistant")
-st.write("Send your IFC model in structured chunks to the Assistant using gpt-4-turbo.")
 
 if "ifc_path" not in st.session_state:
     st.error("No IFC file uploaded. Please complete Step 1.")
     st.stop()
 
 ifc_path = st.session_state["ifc_path"]
-ifc_model = ifcopenshell.open(ifc_path)
+
+try:
+    ifc_model = ifcopenshell.open(ifc_path)
+except Exception as e:
+    st.error(f"Failed to open IFC file: {e}")
+    st.stop()
 
 def extract_full_ifc_data(ifc_model):
     elements = ifc_model.by_type("IfcProduct")
@@ -65,43 +68,82 @@ def extract_full_ifc_data(ifc_model):
         data.append(row)
     return pd.DataFrame(data)
 
-df = extract_full_ifc_data(ifc_model)
+with st.spinner("Extracting elements from IFC model..."):
+    df = extract_full_ifc_data(ifc_model)
+
+st.success(f"Extracted {len(df)} elements.")
 st.dataframe(df, use_container_width=True)
 
-provider = "OpenAI"
-st.session_state["selected_provider"] = provider
-api_key = st.text_input("Enter your OpenAI API key:", type="password")
-if st.button("Confirm"):
-    st.session_state["api_key"] = api_key
-    st.success("API key saved.")
+st.subheader("Connect Your Own Assistant")
+provider = st.selectbox("Select your LLM Provider:", ("OpenAI", "Anthropic", "Azure OpenAI", "Gemini", "DeepSeek", "Ollama"))
+api_key = st.text_input("API Key", type="password")
+extra_info = {}
 
-def chunk_dataframe(df, max_rows=50):
-    return [df.iloc[i:i+max_rows] for i in range(0, len(df), max_rows)]
+if provider == "Azure OpenAI":
+    extra_info["endpoint"] = st.text_input("Azure Endpoint")
+    extra_info["deployment_name"] = st.text_input("Deployment Name")
+
+if st.button("Confirm LLM Setup"):
+    st.session_state["selected_provider"] = provider
+    st.session_state["api_key"] = api_key
+    st.session_state["extra_info"] = extra_info
+    st.success(f"{provider} configured.")
+
+def chunk_dataframe_by_type(df, max_tokens=8000):
+    def estimate_tokens(text: str) -> int:
+        return int(len(text.encode("utf-8")) / 4)
+
+    chunks = []
+    grouped = df.groupby("ElementType")
+    for element_type, group_df in grouped:
+        current_chunk = []
+        current_tokens = 0
+        chunk_id = 1
+        for _, row in group_df.iterrows():
+            csv_line = ",".join([str(v) for v in row.values]) + "\n"
+            tokens = estimate_tokens(csv_line)
+            if current_tokens + tokens > max_tokens:
+                csv_data = "".join(current_chunk)
+                header = f"[{element_type}] – Chunk {chunk_id}"
+                chunks.append((header, csv_data))
+                current_chunk = []
+                current_tokens = 0
+                chunk_id += 1
+            current_chunk.append(csv_line)
+            current_tokens += tokens
+        if current_chunk:
+            header = f"[{element_type}] – Chunk {chunk_id}"
+            csv_data = "".join(current_chunk)
+            chunks.append((header, csv_data))
+    return chunks
 
 if st.button("Send to Assistant"):
-    load_dotenv()
-    openai.api_key = api_key
-    assistant = openai.beta.assistants.create(
-        name="IFC Assistant",
-        instructions="Use all chunks as one IFC model. Only return responses based on this context.",
-        model="gpt-4-turbo",
-        tools=[]
-    )
-    thread = openai.beta.threads.create()
-    st.session_state["assistant_id"] = assistant.id
-    st.session_state["thread_id"] = thread.id
-
-    chunks = chunk_dataframe(df)
-    for i, chunk in enumerate(chunks):
-        csv_data = chunk.to_csv(index=False)
-        openai.beta.threads.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=f"IFC Model Chunk {i+1}:
-
-{csv_data}"
+    if not api_key:
+        st.error("Please enter your API key first.")
+        st.stop()
+    with st.spinner("Preparing and sending model to assistant..."):
+        load_dotenv()
+        openai.api_key = api_key
+        header_line = ",".join(df.columns) + "\n"
+        chunks = chunk_dataframe_by_type(df)
+        full_chunks = [(h, header_line + c) for h, c in chunks]
+        st.session_state["merged_ifc_model_data"] = "\n\n".join([f"{h}\n\n{c}" for h, c in full_chunks])
+        assistant = openai.beta.assistants.create(
+            name="IFC Assistant",
+            instructions="You will receive structured data in multiple CSV chunks. Treat all chunks as one IFC model. Do not assume missing context.",
+            model="gpt-4-turbo",
+            tools=[]
         )
-        time.sleep(1.5)
-
-    st.success(f"Uploaded {len(chunks)} chunks to Assistant.")
-    st.switch_page("pages/6_Chat_Assistant.py")
+        thread = openai.beta.threads.create()
+        st.session_state["assistant_id"] = assistant.id
+        st.session_state["thread_id"] = thread.id
+        for i, (header, chunk) in enumerate(full_chunks):
+            st.write(f"Sending chunk {i+1} of {len(full_chunks)}: {header}")
+            openai.beta.threads.messages.create(
+                thread_id=thread.id,
+                role="user",
+                content=f"{header}\n\n{chunk}"
+            )
+            time.sleep(1.5)
+        st.success("All chunks successfully uploaded to assistant.")
+        st.switch_page("pages/6_Chat_Assistant.py")
