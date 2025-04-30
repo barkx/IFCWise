@@ -6,19 +6,16 @@ import ifcopenshell
 import ifcopenshell.util.element
 from dotenv import load_dotenv
 import sidebar
-import io
+import time
 
-# Setup Streamlit (must be first)
+# Setup Streamlit
 st.set_page_config(page_title="I/F/C/Wise – Upload to Assistant", page_icon="icon.png", layout="wide")
-
-# Sidebar
 sidebar.sidebar_navigation()
 
-# Title
 st.title("Upload Full IFC Model to Assistant")
-st.write("Extracting full IFC model properties, quantities, and coordinates.")
+st.write("This will send all elements from the IFC file to the assistant in structured batches.")
 
-# --- Check uploaded IFC file ---
+# --- Validate IFC file ---
 if "ifc_path" not in st.session_state:
     st.error("No IFC file uploaded. Please complete Step 1.")
     st.stop()
@@ -31,7 +28,7 @@ except Exception as e:
     st.error(f"Failed to open IFC file: {e}")
     st.stop()
 
-# --- Extract full IFC model ---
+# --- Extract full IFC model data ---
 def extract_full_ifc_data(ifc_model):
     elements = ifc_model.by_type("IfcProduct")
     data = []
@@ -44,14 +41,12 @@ def extract_full_ifc_data(ifc_model):
             "Description": getattr(e, "Description", ""),
             "PredefinedType": getattr(e, "PredefinedType", "") if hasattr(e, "PredefinedType") else "",
         }
-        # Coordinates
         try:
             loc = e.ObjectPlacement.RelativePlacement.Location.Coordinates
             row["LocationX"], row["LocationY"], row["LocationZ"] = loc[0], loc[1], loc[2]
         except:
             row["LocationX"] = row["LocationY"] = row["LocationZ"] = ""
 
-        # Property Sets
         try:
             psets = ifcopenshell.util.element.get_psets(e)
             for pset_name, props in psets.items():
@@ -60,111 +55,111 @@ def extract_full_ifc_data(ifc_model):
         except:
             pass
 
-        # Quantities
         try:
             for rel in e.IsDefinedBy:
                 if rel.is_a("IfcRelDefinesByProperties"):
                     prop = rel.RelatingPropertyDefinition
                     if prop.is_a("IfcElementQuantity"):
                         for quantity in prop.Quantities:
-                            q_value = getattr(quantity, "LengthValue", None) or getattr(quantity, "AreaValue", None) or getattr(quantity, "VolumeValue", None) or getattr(quantity, "HeightValue", None)
-                            if q_value:
-                                row[f"Quantity.{quantity.Name}"] = q_value
+                            q_val = (
+                                getattr(quantity, "LengthValue", None)
+                                or getattr(quantity, "AreaValue", None)
+                                or getattr(quantity, "VolumeValue", None)
+                                or getattr(quantity, "HeightValue", None)
+                            )
+                            if q_val is not None:
+                                row[f"Quantity.{quantity.Name}"] = q_val
         except:
             pass
 
         data.append(row)
-
     return pd.DataFrame(data)
 
-# --- Extract model now ---
-with st.spinner("Extracting full IFC model..."):
+# --- Load model into DataFrame ---
+with st.spinner("Extracting elements from IFC model..."):
     df = extract_full_ifc_data(ifc_model)
 
-st.success(f"Extracted {len(df)} elements from IFC model.")
+st.success(f"Extracted {len(df)} elements.")
 st.dataframe(df, use_container_width=True)
 
-# --- Select Assistant ---
-st.subheader("Select an Assistant Option")
+# --- LLM Provider Config ---
+st.subheader("Connect Your Own Assistant")
 
-upload_option = st.radio(
-    "",
-    ("Use IFCWISE ChatGPT API (default)", "Use Your Own LLM"),
-    index=0,
+provider = st.selectbox(
+    "Select your LLM Provider:",
+    ("OpenAI", "Anthropic", "Azure OpenAI", "Gemini", "DeepSeek", "Ollama"),
 )
 
-provider = None
-api_key = None
+api_key = ""
 extra_info = {}
 
-if upload_option == "Use Your Own LLM":
-    st.divider()
-    st.subheader("Provide Your LLM API Details")
-
-    provider = st.selectbox(
-        "Select your LLM Provider:",
-        ("OpenAI", "Anthropic", "Azure OpenAI", "Gemini", "DeepSeek", "Ollama"),
-    )
-
-    if provider == "Azure OpenAI":
-        extra_info["endpoint"] = st.text_input("Azure Endpoint")
-        api_key = st.text_input("Azure API Key", type="password")
-        extra_info["deployment_name"] = st.text_input("Deployment Name")
-    else:
-        api_key = st.text_input(f"{provider} API Key", type="password")
-
-    if st.button("Confirm LLM Selection"):
-        st.session_state["selected_provider"] = provider
-        st.session_state["api_key"] = api_key
-        st.session_state["extra_info"] = extra_info
-        st.success(f"{provider} selected!")
+if provider == "Azure OpenAI":
+    extra_info["endpoint"] = st.text_input("Azure Endpoint")
+    api_key = st.text_input("Azure API Key", type="password")
+    extra_info["deployment_name"] = st.text_input("Deployment Name")
 else:
-    st.success("Default IFCWISE ChatGPT API will be used.")
-    st.session_state["selected_provider"] = "IFCWISE ChatGPT"
+    api_key = st.text_input(f"{provider} API Key", type="password")
 
-# --- Chunk and Upload ---
-st.divider()
-st.subheader("Upload Full IFC Model to Assistant")
+if st.button("Confirm LLM Setup"):
+    st.session_state["selected_provider"] = provider
+    st.session_state["api_key"] = api_key
+    st.session_state["extra_info"] = extra_info
+    st.success(f"{provider} configured.")
 
-def chunk_dataframe(df, max_lines=50):
+# --- Chunking with token limit safeguard ---
+def estimate_tokens(text: str) -> int:
+    # Rough token estimate (safe for GPT models, ~4 chars/token)
+    return int(len(text.encode("utf-8")) / 4)
+
+def chunk_dataframe_by_type(df, max_tokens=8000):
     chunks = []
-    for i in range(0, len(df), max_lines):
-        chunks.append(df.iloc[i:i+max_lines])
+    grouped = df.groupby("ElementType")
+
+    for element_type, group_df in grouped:
+        current_chunk = []
+        current_tokens = 0
+        chunk_id = 1
+
+        for _, row in group_df.iterrows():
+            csv_line = ",".join([str(v) for v in row.values]) + "\n"
+            tokens = estimate_tokens(csv_line)
+
+            if current_tokens + tokens > max_tokens:
+                csv_data = "".join(current_chunk)
+                header = f"[{element_type}] – Chunk {chunk_id}"
+                chunks.append((header, csv_data))
+                current_chunk = []
+                current_tokens = 0
+                chunk_id += 1
+
+            current_chunk.append(csv_line)
+            current_tokens += tokens
+
+        if current_chunk:
+            header = f"[{element_type}] – Chunk {chunk_id}"
+            csv_data = "".join(current_chunk)
+            chunks.append((header, csv_data))
+
     return chunks
 
-if st.button("🚀 Send to Assistant"):
-    with st.spinner("Sending to Assistant... Please wait."):
-        chunks = chunk_dataframe(df)
+# --- Upload process ---
+st.divider()
+st.subheader("Upload to Assistant")
 
-        if st.session_state["selected_provider"] == "IFCWISE ChatGPT":
-            load_dotenv()
-            openai.api_key = os.getenv("OPENAI_API_KEY")
+if st.button("Send to Assistant"):
+    if not api_key:
+        st.error("Please enter your API key first.")
+        st.stop()
 
-            assistant = openai.beta.assistants.create(
-                name="IFC Assistant",
-                instructions="Help users with full IFC model data uploaded as CSV.",
-                model="gpt-4-turbo",
-                tools=[]
-            )
-            thread = openai.beta.threads.create()
+    with st.spinner("Preparing and sending model to assistant..."):
+        header_line = ",".join(df.columns) + "\n"
+        chunks = chunk_dataframe_by_type(df)
 
-            st.session_state["assistant_id"] = assistant.id
-            st.session_state["thread_id"] = thread.id
+        # Add header to each CSV chunk
+        full_chunks = [(h, header_line + c) for h, c in chunks]
+        combined_text = "\n\n".join([f"{h}\n\n{c}" for h, c in full_chunks])
 
-            for chunk in chunks:
-                message = f"Here is a chunk of IFC data:\n\n{chunk.to_csv(index=False)}"
-                openai.beta.threads.messages.create(
-                    thread_id=thread.id,
-                    role="user",
-                    content=message
-                )
-
-            st.success("Uploaded to IFCWISE ChatGPT.")
-
-        else:
-            # Save merged IFC model to session for other LLM providers
-            merged_text = "\n\n".join([chunk.to_csv(index=False) for chunk in chunks])
-            st.session_state["merged_ifc_model_data"] = merged_text
-            st.success(f"Merged IFC model stored for {st.session_state['selected_provider']}.")
+        st.session_state["merged_ifc_model_data"] = combined_text
+        st.success(f"Prepared {len(full_chunks)} chunks and saved for provider: {provider}")
 
     st.switch_page("pages/6_Chat_Assistant.py")
