@@ -10,8 +10,6 @@ import time
 
 # Setup Streamlit
 st.set_page_config(page_title="I/F/C/Wise – Upload to Assistant", page_icon="icon.png", layout="wide")
-
-# Sidebar
 sidebar.sidebar_navigation()
 
 st.title("Upload Full IFC Model to Assistant")
@@ -77,38 +75,41 @@ def extract_full_ifc_data(ifc_model):
         data.append(row)
     return pd.DataFrame(data)
 
-# --- Load model into DataFrame ---
 with st.spinner("Extracting elements from IFC model..."):
     df = extract_full_ifc_data(ifc_model)
 
 st.success(f"Extracted {len(df)} elements.")
 st.dataframe(df, use_container_width=True)
 
-# --- LLM Provider Config ---
+# --- Provider config ---
 st.subheader("Connect Your Own Assistant")
+
+if "provider" not in st.session_state:
+    st.session_state["provider"] = None
 
 provider = st.selectbox(
     "Select your LLM Provider:",
     ("OpenAI", "Anthropic", "Azure OpenAI", "Gemini", "DeepSeek", "Ollama"),
+    key="provider"
 )
 
-api_key = ""
 extra_info = {}
+api_key = st.text_input(f"{provider} API Key", type="password")
 
 if provider == "Azure OpenAI":
     extra_info["endpoint"] = st.text_input("Azure Endpoint")
-    api_key = st.text_input("Azure API Key", type="password")
     extra_info["deployment_name"] = st.text_input("Deployment Name")
-else:
-    api_key = st.text_input(f"{provider} API Key", type="password")
 
 if st.button("Confirm LLM Setup"):
-    st.session_state["selected_provider"] = provider
-    st.session_state["api_key"] = api_key
-    st.session_state["extra_info"] = extra_info
-    st.success(f"{provider} selected.")
+    if not api_key:
+        st.warning("API key required.")
+    else:
+        st.session_state["selected_provider"] = provider
+        st.session_state["api_key"] = api_key
+        st.session_state["extra_info"] = extra_info
+        st.success(f"{provider} selected and stored.")
 
-# --- Chunking logic by type ---
+# --- Chunking logic ---
 def chunk_dataframe_by_type(df, max_rows_per_chunk=50):
     chunks = []
     grouped = df.groupby("ElementType")
@@ -121,20 +122,19 @@ def chunk_dataframe_by_type(df, max_rows_per_chunk=50):
             chunks.append((header, chunk_csv))
     return chunks
 
-# --- Upload process ---
+# --- Upload ---
 st.divider()
 st.subheader("Upload to Assistant")
 
 if st.button("Send to Assistant"):
-    if not api_key:
-        st.error("Please enter your API key first.")
+    if "api_key" not in st.session_state or not st.session_state["api_key"]:
+        st.error("Please confirm LLM setup with API key.")
         st.stop()
 
     with st.spinner("Sending all data to assistant..."):
         chunks = chunk_dataframe_by_type(df, max_rows_per_chunk=50)
         full_text = "\n\n".join([f"{header}\n\n{csv}" for header, csv in chunks])
-
         st.session_state["merged_ifc_model_data"] = full_text
-        st.success(f"IFC model data prepared for {provider}.")
+        st.success(f"IFC model data prepared for {st.session_state['selected_provider']}.")
 
     st.switch_page("pages/6_Chat_Assistant.py")
