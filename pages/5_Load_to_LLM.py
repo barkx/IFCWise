@@ -143,9 +143,6 @@ def chunk_dataframe_by_type(df, max_tokens=8000):
     return chunks
 
 # --- Upload process ---
-st.divider()
-st.subheader("Upload to Assistant")
-
 if st.button("Send to Assistant"):
     if not api_key:
         st.error("Please enter your API key first.")
@@ -157,9 +154,36 @@ if st.button("Send to Assistant"):
 
         # Add header to each CSV chunk
         full_chunks = [(h, header_line + c) for h, c in chunks]
+
+        # Store a clean merged copy just for context if needed
         combined_text = "\n\n".join([f"{h}\n\n{c}" for h, c in full_chunks])
-
         st.session_state["merged_ifc_model_data"] = combined_text
-        st.success(f"Prepared {len(full_chunks)} chunks and saved for provider: {provider}")
 
-    st.switch_page("pages/6_Chat_Assistant.py")
+        # Initialize assistant thread
+        load_dotenv()
+        openai.api_key = api_key
+        try:
+            assistant = openai.beta.assistants.create(
+                name="IFC Assistant",
+                instructions="You will receive structured data in multiple CSV chunks. Treat all chunks as one IFC model. Do not assume missing context.",
+                model="gpt-4-turbo",
+                tools=[]
+            )
+            thread = openai.beta.threads.create()
+            st.session_state["assistant_id"] = assistant.id
+            st.session_state["thread_id"] = thread.id
+
+            for i, (header, chunk) in enumerate(full_chunks):
+                st.write(f"Sending chunk {i+1} of {len(full_chunks)}: {header}")
+                openai.beta.threads.messages.create(
+                    thread_id=thread.id,
+                    role="user",
+                    content=f"{header}\n\n{chunk}"
+                )
+                time.sleep(1.5)  # spacing out messages a little
+
+            st.success("All chunks successfully uploaded to assistant.")
+            st.switch_page("pages/6_Chat_Assistant.py")
+
+        except Exception as e:
+            st.error(f"Failed to send data to assistant: {e}")
