@@ -110,7 +110,7 @@ if st.button("Confirm LLM Setup"):
         st.success(f"{provider} selected and stored.")
 
 # --- Chunking logic ---
-def chunk_dataframe_by_type(df, max_rows_per_chunk=50):
+def chunk_dataframe_by_type(df, max_rows_per_chunk=40):
     chunks = []
     grouped = df.groupby("ElementType")
     for element_type, group_df in grouped:
