@@ -46,7 +46,7 @@ if st.button("Ask Assistant"):
             run = openai.beta.threads.runs.create(
                 thread_id=st.session_state["thread_id"],
                 assistant_id=st.session_state["assistant_id"],
-                instructions="Answer based on uploaded IFC model data."
+                instructions="Answer based on uploaded IFC model data. The data has been provided in multiple chunks, but all together they form a single cohesive project model."
             )
 
             with st.spinner("Waiting for assistant to respond..."):
@@ -60,29 +60,36 @@ if st.button("Ask Assistant"):
                     time.sleep(1)
 
             # Get and show response
-            messages = openai.beta.threads.messages.list(thread_id=st.session_state["thread_id"])
-            messages_sorted = sorted(messages.data, key=lambda x: x.created_at, reverse=True)
+            try:
+                messages = openai.beta.threads.messages.list(thread_id=st.session_state["thread_id"])
+                messages_sorted = sorted(messages.data, key=lambda x: x.created_at, reverse=True)
 
-            i = 0
-            while i < len(messages_sorted):
-                msg = messages_sorted[i]
-                if msg.role == "assistant" and i + 1 < len(messages_sorted) and messages_sorted[i + 1].role == "user":
-                    user_msg = messages_sorted[i + 1]
-                    assistant_msg = msg
+                i = 0
+                while i < len(messages_sorted):
+                    msg = messages_sorted[i]
+                    if msg.role == "assistant" and i + 1 < len(messages_sorted) and messages_sorted[i + 1].role == "user":
+                        user_msg = messages_sorted[i + 1]
+                        assistant_msg = msg
 
-                    with st.container():
-                        st.markdown(f"**You:** {user_msg.content[0].text.value}")
-                        st.markdown(f"**Assistant:** {assistant_msg.content[0].text.value}")
-                    st.divider()
-                    i += 2
-                else:
-                    i += 1
+                        with st.container():
+                            st.markdown(f"**You:** {user_msg.content[0].text.value}")
+                            st.markdown(f"**Assistant:** {assistant_msg.content[0].text.value}")
+                        st.divider()
+                        i += 2
+                    else:
+                        i += 1
+            except Exception as e:
+                st.error(f"Failed to process assistant response: {e}")
 
         else:
             # Manual API logic for external LLMs
             api_key = st.session_state.get("api_key")
             extra = st.session_state.get("extra_info", {})
-            final_prompt = f"You have received the following IFC model data:\n\n{model_context}\n\nNow answer this question:\n{question}"
+            final_prompt = (
+                f"The IFC model data has been provided in multiple CSV chunks due to size limits. "
+                f"Each chunk contains part of the same project. Use the full context:\n\n{model_context}\n\n"
+                f"Now answer this question:\n{question}"
+            )
             answer = ""
 
             try:
@@ -124,7 +131,12 @@ if st.button("Ask Assistant"):
                         "messages": [{"role": "user", "content": final_prompt}]
                     }
                     response = requests.post(url, headers=headers, json=payload)
-                    answer = response.json()["choices"][0]["message"]["content"]
+                    response_json = response.json()
+                    if "choices" in response_json:
+                        answer = response_json["choices"][0]["message"]["content"]
+                    else:
+                        st.error(f"OpenAI API returned an error: {response_json}")
+                        st.stop()
 
                 else:
                     answer = "Provider not supported yet."
@@ -134,9 +146,3 @@ if st.button("Ask Assistant"):
 
             st.markdown(f"**You:** {question}")
             st.markdown(f"**{provider}:** {answer}")
-
-# Navigation to Modify Assistant
-# st.divider()
-# st.subheader("Ready to Modify the Model?")
-# if st.button("Go to Modify Assistant"):
-#     st.switch_page("pages/7_Modify_Assistant.py")
